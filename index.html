@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Video Transcripts</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --fg:#1d1c1a; --muted:#6b675f; --accent:#1f5f8b; --ok:#2e7d32; --err:#b3261e; --line:#e2dfd8 }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --card:#1e1d1b; --fg:#eeece6; --muted:#a19d94; --accent:#6fb1e0; --ok:#7bc47f; --err:#f2938c; --line:#33312d; color-scheme:dark } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.5 -apple-system,system-ui,sans-serif; padding:24px 16px 60px }
+  main { max-width:640px; margin:0 auto; display:grid; gap:20px }
+  h1 { font-size:26px; margin:0 }
+  h2 { font-size:18px; margin:0 }
+  p { margin:0; color:var(--muted) }
+  .pick { display:block; text-align:center; background:var(--accent); color:#fff; font-size:22px; font-weight:600; padding:28px 16px; border-radius:16px; cursor:pointer }
+  input[type=file] { display:none }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; display:grid; gap:8px; min-width:0 }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap }
+  .name { font-weight:600; overflow-wrap:anywhere }
+  .bar { height:10px; background:var(--line); border-radius:5px; overflow:hidden }
+  .bar > i { display:block; height:100%; width:0; background:var(--accent); transition:width .3s }
+  .ok { color:var(--ok); font-weight:600 } .err { color:var(--err); font-weight:600 }
+  button { font:inherit; font-size:15px; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer }
+  .text { white-space:pre-wrap; font-size:15px; max-height:180px; overflow:auto; color:var(--fg) }
+  .text.open { max-height:none }
+  #missing { color:var(--err) }
+</style>
+</head>
+<body>
+<main>
+  <p id="missing" hidden>This link is missing its key. Ask for the full link again.</p>
+
+  <section id="upload" style="display:grid;gap:14px">
+    <h1>Send your videos</h1>
+    <p>Tap the button, pick one or more videos, then keep this page open until each one says <b>Done</b>. Big videos can take several minutes on Wi-Fi.</p>
+    <label class="pick" for="file">Choose videos</label>
+    <input id="file" type="file" accept="video/*,audio/*" multiple>
+    <div id="jobs" style="display:grid;gap:10px"></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <div class="row"><h2>Transcripts</h2><button id="refresh">Refresh</button></div>
+    <div id="list" style="display:grid;gap:10px"><p>Loading…</p></div>
+  </section>
+</main>
+<script>
+const API = 'https://api.elevenlabs.io/v1/speech-to-text';
+const KEY = new URLSearchParams(location.hash.slice(1)).get('k');
+const $ = s => document.querySelector(s);
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+
+if (!KEY) { $('#missing').hidden = false; $('#upload').hidden = true; }
+
+let wake = null;
+async function keepAwake(on) {
+  try { if (on && !wake) wake = await navigator.wakeLock.request('screen'); else if (!on && wake) { wake.release(); wake = null; } } catch {}
+}
+
+function mb(n) { return (n / 1048576).toFixed(0) + ' MB'; }
+
+function upload(file, ui) {
+  return new Promise(resolve => {
+    const fd = new FormData();
+    fd.append('model_id', 'scribe_v2');
+    fd.append('tag_audio_events', 'false');
+    fd.append('file', file, file.name || 'video.mov');
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', API);
+    xhr.setRequestHeader('xi-api-key', KEY);
+    xhr.upload.onprogress = e => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round(e.loaded / e.total * 100);
+      ui.bar.style.width = pct + '%';
+      ui.status.textContent = pct < 100 ? `Uploading ${pct}% (${mb(e.loaded)} of ${mb(e.total)})` : 'Uploaded. Writing the transcript… keep this page open.';
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        ui.bar.style.width = '100%';
+        ui.status.className = 'ok'; ui.status.textContent = 'Done ✓';
+        resolve(true);
+      } else {
+        let msg = xhr.responseText; try { msg = JSON.parse(msg).detail?.message || JSON.parse(msg).detail || msg; } catch {}
+        ui.status.className = 'err'; ui.status.textContent = 'Failed: ' + String(msg).slice(0, 200) + ' — try choosing it again.';
+        resolve(false);
+      }
+    };
+    xhr.onerror = () => { ui.status.className = 'err'; ui.status.textContent = 'Connection dropped. Choose the video again to retry.'; resolve(false); };
+    xhr.send(fd);
+  });
+}
+
+$('#file').addEventListener('change', async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  if (!files.length) return;
+  const items = files.map(f => {
+    const card = el('div', 'card'), row = el('div', 'row');
+    row.append(el('span', 'name', f.name || 'Video'), el('span', null, mb(f.size)));
+    const bar = el('div', 'bar'), fill = el('i'); bar.append(fill);
+    const status = el('span', null, 'Waiting…');
+    card.append(row, bar, status); $('#jobs').prepend(card);
+    return { f, ui: { bar: fill, status } };
+  });
+  await keepAwake(true);
+  for (const it of items) { it.ui.status.textContent = 'Starting…'; await upload(it.f, it.ui); loadList(); }
+  await keepAwake(false);
+});
+
+async function loadList() {
+  if (!KEY) { $('#list').innerHTML = ''; return; }
+  const list = $('#list');
+  try {
+    const r = await fetch(API + '/transcripts', { headers: { 'xi-api-key': KEY } });
+    const { transcripts = [] } = await r.json();
+    transcripts.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    if (!transcripts.length) { list.replaceChildren(el('p', null, 'No transcripts yet. They show up here once a video finishes.')); return; }
+    const cards = await Promise.all(transcripts.map(async t => {
+      const d = await fetch(`${API}/transcripts/${t.id}`, { headers: { 'xi-api-key': KEY } }).then(r => r.json()).catch(() => ({}));
+      const card = el('div', 'card'), row = el('div', 'row');
+      const when = new Date(t.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      const mins = d.audio_duration_secs ? ` · ${Math.round(d.audio_duration_secs / 60)} min` : '';
+      const copy = el('button', null, 'Copy');
+      const text = el('div', 'text', d.text || '(could not load)');
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(d.text || ''); copy.textContent = 'Copied ✓'; }
+        catch { const s = getSelection(), rg = document.createRange(); rg.selectNodeContents(text); s.removeAllRanges(); s.addRange(rg); copy.textContent = 'Selected — tap Copy'; }
+        setTimeout(() => copy.textContent = 'Copy', 2500);
+      };
+      text.onclick = () => text.classList.toggle('open');
+      row.append(el('span', 'name', when + mins), copy);
+      card.append(row, text);
+      return card;
+    }));
+    list.replaceChildren(...cards);
+  } catch (err) {
+    list.replaceChildren(el('p', 'err', 'Could not load transcripts: ' + err.message));
+  }
+}
+$('#refresh').onclick = loadList;
+loadList();
+</script>
+</body>
+</html>
